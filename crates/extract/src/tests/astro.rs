@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use fallow_types::discover::FileId;
+use fallow_types::extract::ModuleInfo;
 
 use crate::parse_source_to_module;
 
@@ -479,4 +480,123 @@ const { data } = await import("./data");
             .any(|import| import.source == "./data")
     );
     assert!(crate::tests::eager_dynamic_import_sources(&info).is_empty());
+}
+
+fn parse_astro_with_complexity(source: &str) -> ModuleInfo {
+    parse_source_to_module(FileId(0), Path::new("Page.astro"), source, 0, true)
+}
+
+const NESTED_FN: &str = "function nested(a, b) { if (a) { if (b) { return 1; } } return 0; }";
+
+#[test]
+fn script_block_functions_are_scored_for_every_executable_script_form() {
+    for attrs in [
+        "",
+        " is:inline",
+        r#" lang="ts""#,
+        r#" type="module""#,
+        r" TYPE='text/javascript'",
+        r#" type="text/partytown""#,
+        r#" data-type="widget""#,
+        " define:vars={{ title }}",
+    ] {
+        let source = format!(
+            "---\nconst title = 'x';\n---\n<h1>{{title}}</h1>\n<script{attrs}>\n{NESTED_FN}\n</script>\n"
+        );
+        let info = parse_astro_with_complexity(&source);
+
+        assert_eq!(info.complexity.len(), 1, "attrs: {attrs:?}");
+        let function = &info.complexity[0];
+        assert_eq!(function.name, "nested", "attrs: {attrs:?}");
+        assert_eq!(function.line, 6, "attrs: {attrs:?}");
+        assert_eq!(function.cyclomatic, 3, "attrs: {attrs:?}");
+        assert_eq!(function.cognitive, 3, "attrs: {attrs:?}");
+    }
+}
+
+#[test]
+fn script_block_with_type_annotations_is_scored() {
+    let info = parse_astro_with_complexity(
+        r#"<script lang="ts">
+function typed(flag: boolean): number { if (flag) { return 1; } return 0; }
+</script>
+"#,
+    );
+
+    assert_eq!(info.complexity.len(), 1);
+    assert_eq!(info.complexity[0].name, "typed");
+    assert_eq!(info.complexity[0].line, 2);
+    assert_eq!(info.complexity[0].cyclomatic, 2);
+}
+
+#[test]
+fn script_block_complexity_maps_columns_to_astro_source() {
+    let info = parse_astro_with_complexity(
+        "<script>const helper = () => { if (flag) return 1; return 0; };</script>",
+    );
+
+    assert_eq!(info.complexity.len(), 1);
+    let function = &info.complexity[0];
+    assert_eq!(function.name, "helper");
+    assert_eq!(function.line, 1);
+    assert_eq!(function.col, 23);
+}
+
+#[test]
+fn script_blocks_are_scored_with_frontmatter_and_template_without_double_counting() {
+    let info = parse_astro_with_complexity(
+        r"---
+function frontmatterFn(a) { if (a) { return 1; } return 0; }
+---
+<p>{ok ? <a /> : <b />}</p>
+<script>function first(a) { if (a) { return 1; } return 0; }</script>
+<script is:inline>function second(a) { if (a) { return 1; } return 0; }</script>
+",
+    );
+
+    let mut scored: Vec<(&str, u32)> = info
+        .complexity
+        .iter()
+        .map(|function| (function.name.as_str(), function.line))
+        .collect();
+    scored.sort_unstable();
+    assert_eq!(
+        scored,
+        vec![
+            ("<template>", 4),
+            ("first", 5),
+            ("frontmatterFn", 2),
+            ("second", 6),
+        ]
+    );
+}
+
+#[test]
+fn script_blocks_that_do_not_run_as_javascript_are_not_scored() {
+    let control = parse_astro_with_complexity(&format!("<script>{NESTED_FN}</script>"));
+    assert_eq!(control.complexity.len(), 1);
+
+    for source in [
+        format!("<!-- <script>{NESTED_FN}</script> -->"),
+        format!(r#"<script type="text/plain">{NESTED_FN}</script>"#),
+        format!(r"<script type=text/x-template>{NESTED_FN}</script>"),
+        r#"<script type="application/ld+json">{"@context":"https://schema.org"}</script>"#
+            .to_string(),
+        r#"<script src="./client.ts"></script>"#.to_string(),
+        "<script>function broken( { if (</script>".to_string(),
+        format!("<script>{NESTED_FN}"),
+    ] {
+        let info = parse_astro_with_complexity(&source);
+        assert!(info.complexity.is_empty(), "source: {source}");
+    }
+}
+
+#[test]
+fn script_blocks_are_not_scored_when_complexity_is_not_requested() {
+    let source = format!("<script>{NESTED_FN}</script>");
+    let info = parse_source_to_module(FileId(0), Path::new("Page.astro"), &source, 0, false);
+    let control = parse_astro_with_complexity(&source);
+
+    assert!(info.complexity.is_empty());
+    assert_eq!(control.complexity.len(), 1);
 }

@@ -49,6 +49,10 @@ static STYLE_CLOSE_RE: LazyLock<regex::Regex> =
 static SRC_ATTR_RE: LazyLock<regex::Regex> =
     LazyLock::new(|| crate::static_regex(r#"(?i)(?:^|\s)src\s*=\s*["'](?P<src>[^"']+)["']"#));
 
+/// Regex capturing the value of a `type` attribute on a script tag.
+static SCRIPT_TYPE_ATTR_RE: LazyLock<regex::Regex> =
+    LazyLock::new(|| crate::static_regex(r#"(?i)(?:^|\s)type\s*=\s*["']?(?P<type>[^"'\s]*)"#));
+
 /// Regex matching HTML comments for stripping before template scanning.
 static HTML_COMMENT_RE: LazyLock<regex::Regex> =
     LazyLock::new(|| crate::static_regex(r"(?s)<!--.*?-->"));
@@ -655,11 +659,17 @@ pub(crate) fn parse_astro_to_module(
         frontmatter_offset,
     );
     // Health complexity (only when requested): the frontmatter functions (scored
-    // above) plus a synthetic `<template>` entry for the markup `{ ... }`
-    // expression / iteration complexity, mirroring the Vue/Svelte synthetic
-    // template entry. Folds into the existing complexity aggregate; no new rule.
+    // above), the client `<script>` functions, plus a synthetic `<template>` entry
+    // for the markup `{ ... }` expression / iteration complexity, mirroring the
+    // Vue/Svelte synthetic template entry. Folds into the existing complexity
+    // aggregate; no new rule.
     info.complexity.extend(frontmatter_complexity);
     if need_complexity {
+        info.complexity.extend(compute_astro_script_complexity(
+            template,
+            template_offset,
+            &line_offsets,
+        ));
         info.complexity
             .extend(crate::template_complexity::compute_astro_template_complexity(source));
     }
@@ -834,6 +844,58 @@ fn extend_inline_script_imports(
         inline_extractor.remap_spans_with(|span| extraction.remap_span(span));
         imports.append(&mut inline_extractor.imports);
     }
+}
+
+/// Score the functions of every `<script>` block that runs as JavaScript, with
+/// lines and columns mapped onto the Astro source.
+fn compute_astro_script_complexity(
+    template: &str,
+    template_offset: usize,
+    line_offsets: &[u32],
+) -> Vec<fallow_types::extract::FunctionComplexity> {
+    let comment_ranges: Vec<(usize, usize)> = HTML_COMMENT_RE
+        .find_iter(template)
+        .map(|m| (m.start(), m.end()))
+        .collect();
+    let mut complexity = Vec::new();
+    for block in blocks::scan(template, &SCRIPT_PREFIX_RE, Some(&SCRIPT_CLOSE_RE)) {
+        if pos_in_ranges(&comment_ranges, block.start)
+            || !script_runs_as_javascript(&template[block.attrs.clone()])
+        {
+            continue;
+        }
+        let script = SfcScript {
+            body: template[block.body.clone()].to_string(),
+            is_typescript: true,
+            is_jsx: false,
+            byte_offset: template_offset + block.body.start,
+            src: None,
+            src_span: None,
+            is_setup: false,
+            is_context_module: false,
+            generic_attr: None,
+        };
+        let allocator = Allocator::default();
+        let parser_return = Parser::new(&allocator, &script.body, SourceType::ts()).parse();
+        complexity.extend(crate::sfc::translate_script_complexity(
+            &script,
+            &parser_return.program,
+            line_offsets,
+        ));
+    }
+    complexity
+}
+
+/// A browser executes a script only when its `type` is absent or names
+/// JavaScript. Partytown runs `text/partytown` scripts as JavaScript in a worker.
+/// Other values hold data or templates, such as JSON-LD and import maps.
+fn script_runs_as_javascript(attrs: &str) -> bool {
+    SCRIPT_TYPE_ATTR_RE.captures(attrs).is_none_or(|cap| {
+        matches!(
+            cap["type"].to_ascii_lowercase().as_str(),
+            "" | "module" | "text/javascript" | "application/javascript" | "text/partytown"
+        )
+    })
 }
 
 fn processed_script_src_with_span(attrs: &str, attrs_start: usize) -> Option<(&str, Span)> {
