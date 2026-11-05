@@ -76,6 +76,7 @@ mod group_by_footer_tests;
 mod group_by_issue_types_tests;
 mod grouping_fallback_tests;
 mod guard_tests;
+mod health_astro_script_tests;
 mod health_baseline_tests;
 mod health_css_template_markup_tests;
 mod health_cyclomatic_policy_tests;

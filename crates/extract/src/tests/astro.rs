@@ -585,10 +585,20 @@ fn script_blocks_that_do_not_run_as_javascript_are_not_scored() {
         r#"<script src="./client.ts"></script>"#.to_string(),
         "<script>function broken( { if (</script>".to_string(),
         format!("<script>{NESTED_FN}"),
+        format!(r#"<script>const s = "<!--";</script><!-- <script>{NESTED_FN}</script> -->"#),
     ] {
         let info = parse_astro_with_complexity(&source);
         assert!(info.complexity.is_empty(), "source: {source}");
     }
+}
+
+#[test]
+fn comment_marker_inside_a_script_does_not_hide_later_scripts() {
+    let source =
+        format!(r#"<script>const s = "<!--";</script><script>{NESTED_FN}</script><p>a --> b</p>"#);
+    let info = parse_astro_with_complexity(&source);
+
+    assert_eq!(info.complexity.len(), 1, "source: {source}");
 }
 
 #[test]

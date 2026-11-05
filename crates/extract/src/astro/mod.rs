@@ -853,12 +853,10 @@ fn compute_astro_script_complexity(
     template_offset: usize,
     line_offsets: &[u32],
 ) -> Vec<fallow_types::extract::FunctionComplexity> {
-    let comment_ranges: Vec<(usize, usize)> = HTML_COMMENT_RE
-        .find_iter(template)
-        .map(|m| (m.start(), m.end()))
-        .collect();
+    let scripts = blocks::scan(template, &SCRIPT_PREFIX_RE, Some(&SCRIPT_CLOSE_RE));
+    let comment_ranges = html_comment_ranges_outside_scripts(template, &scripts);
     let mut complexity = Vec::new();
-    for block in blocks::scan(template, &SCRIPT_PREFIX_RE, Some(&SCRIPT_CLOSE_RE)) {
+    for block in scripts {
         if pos_in_ranges(&comment_ranges, block.start)
             || !script_runs_as_javascript(&template[block.attrs.clone()])
         {
@@ -884,6 +882,26 @@ fn compute_astro_script_complexity(
         ));
     }
     complexity
+}
+
+/// HTML comment ranges of `template`. A `<!--` inside a script body is script
+/// text, such as a string literal, so the search skips past that body instead of
+/// reading a comment up to a later `-->` that would hide the scripts between.
+fn html_comment_ranges_outside_scripts(
+    template: &str,
+    scripts: &[blocks::Block],
+) -> Vec<(usize, usize)> {
+    let mut ranges = Vec::new();
+    let mut from = 0;
+    while let Some(m) = HTML_COMMENT_RE.find_at(template, from) {
+        if let Some(script) = scripts.iter().find(|s| s.body.contains(&m.start())) {
+            from = script.body.end;
+        } else {
+            ranges.push((m.start(), m.end()));
+            from = m.end();
+        }
+    }
+    ranges
 }
 
 /// A browser executes a script only when its `type` is absent or names
